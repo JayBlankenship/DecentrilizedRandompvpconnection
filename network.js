@@ -4,6 +4,7 @@
 const Network = {
   // Configuration
   BASE_PEER_ID: 'ChainBootstrap-2025-001',
+  LOBBY_SIZE: 2, // Static for now, will be controlled by random later
   
   // Private state
   myPeerId: null,
@@ -15,6 +16,8 @@ const Network = {
   isInitialized: false,
   basePeerConnections: {},
   baseConn: null,
+  lobbyPeers: [], // Array to store all peers in current lobby
+  partnerConnections: {}, // Object to store connections to all lobby partners
   
   // Callback functions for UI integration
   callbacks: {
@@ -223,8 +226,18 @@ const Network = {
 
       this.partnerConn.on('close', () => {
         if (this.callbacks.logChainEvent) {
-          this.callbacks.logChainEvent(`[Conn] Partner connection closed, will attempt reconnect`, '#ff4444');
+          this.callbacks.logChainEvent(`[Conn] Partner connection closed, looking for new partner...`, '#ff4444');
         }
+        // Reset pairing state and look for new partner
+        this.resetPairingAndRejoin();
+      });
+
+      this.partnerConn.on('error', (err) => {
+        if (this.callbacks.logChainEvent) {
+          this.callbacks.logChainEvent(`[Conn] Partner connection error: ${err.message}, looking for new partner...`, '#ff4444');
+        }
+        // Reset pairing state and look for new partner
+        this.resetPairingAndRejoin();
       });
     }
   },
@@ -303,21 +316,77 @@ const Network = {
     }
   },
 
-  // Auto-reconnection
+  // Reset pairing state and rejoin matchmaking
+  resetPairingAndRejoin() {
+    // Reset pairing state
+    this.paired = false;
+    this.partnerPeerId = null;
+    if (this.partnerConn) {
+      this.partnerConn.close();
+      this.partnerConn = null;
+    }
+    
+    // Update UI to show we're looking for a new partner
+    if (this.callbacks.updateConnectionStatus) {
+      this.callbacks.updateConnectionStatus('Partner disconnected, looking for new partner...');
+    }
+    if (this.callbacks.updateUI) {
+      this.callbacks.updateUI();
+    }
+    
+    // Start looking for a new partner
+    if (this.callbacks.logChainEvent) {
+      this.callbacks.logChainEvent('[Rejoin] Starting search for new partner...', '#ffaa00');
+    }
+    
+    // Try to become base first, if that fails, join existing base
+    setTimeout(() => {
+      this.tryBecomeBase();
+    }, 1000);
+  },
+
+  // Auto-reconnection - modified to handle rejoining when partner is lost
   startAutoReconnect() {
     setInterval(() => {
       if (!this.isInitialized) return;
+      
+      // If we had a partner but lost connection and they're not reconnecting
       if (this.partnerPeerId && (!this.partnerConn || this.partnerConn.open === false)) {
+        // Try to reconnect to existing partner first
         if (this.callbacks.logChainEvent) {
-          this.callbacks.logChainEvent(`[Auto] Reconnecting to partner: ${this.partnerPeerId}`, '#00ccff');
+          this.callbacks.logChainEvent(`[Auto] Attempting to reconnect to partner: ${this.partnerPeerId}`, '#00ccff');
         }
         this.partnerConn = this.peer.connect(this.partnerPeerId);
+        
+        let reconnectTimeout = setTimeout(() => {
+          // If reconnection fails after 10 seconds, look for new partner
+          if (!this.partnerConn || this.partnerConn.open === false) {
+            if (this.callbacks.logChainEvent) {
+              this.callbacks.logChainEvent(`[Auto] Partner ${this.partnerPeerId} not responding, looking for new partner...`, '#ff8800');
+            }
+            this.resetPairingAndRejoin();
+          }
+        }, 10000);
+        
         this.partnerConn.on('open', () => {
+          clearTimeout(reconnectTimeout);
           if (this.callbacks.logChainEvent) {
             this.callbacks.logChainEvent(`[Auto] Reconnected to partner: ${this.partnerPeerId}`);
           }
         });
         this.partnerConn.on('data', (data) => this.handleData(this.partnerConn, data));
+        this.partnerConn.on('close', () => {
+          clearTimeout(reconnectTimeout);
+          this.resetPairingAndRejoin();
+        });
+      }
+      
+      // If we're not paired at all, try to find a partner
+      if (!this.paired && !this.isBase) {
+        if (this.callbacks.logChainEvent) {
+          this.callbacks.logChainEvent('[Auto] Not paired, attempting to find partner...', '#00ccff');
+        }
+        this.tryBecomeBase();
       }
     }, 5000);
   }
