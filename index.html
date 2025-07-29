@@ -146,15 +146,14 @@
     <div class="main-panel">
       <h1>RandomCo-op/PVP</h1>
       <div class="status-bar">
-        Chain Status: <span id="chainStatus">Initializing</span>
+        Lobby Status: <span id="chainStatus">Initializing</span>
         <span id="basePeerIndicator" style="margin-left:16px;font-weight:bold;"></span>
-        <button onclick="joinChain()">Join/Rejoin Chain</button>
+        <button onclick="joinChain()">Join/Rejoin Lobby</button>
       </div>
       <div id="peerListDisplay">
-        <strong>Chain Position:</strong> <span id="chainPosition">Unknown</span> |
-        <strong>Total Peers in Chain:</strong> <span id="peerCount">0</span> |
-        <strong>Next Peer:</strong> <span id="nextPeer">None</span> |
-        <strong>Previous Peer:</strong> <span id="prevPeer">None</span>
+        <strong>Role:</strong> <span id="chainPosition">Unknown</span> |
+        <strong>Lobby Size:</strong> <span id="peerCount">0</span> |
+        <strong>Connected Players:</strong> <span id="nextPeer">None</span>
       </div>
       <div id="peerInfo">My peer ID: <span id="myPeerId">Initializing...</span></div>
       <div id="connectionStatus"></div>
@@ -171,19 +170,19 @@
       <div id="diagnostics"></div>
     </div>
     <div class="output-panel" id="chainLogPanel">
-      <strong>Chain Propagation Log:</strong>
+      <strong>Lobby Events Log:</strong>
       <div id="chainLog"></div>
     </div>
     </div>
     <div class="side-panel">
-      <h3>Peer Chain</h3>
+      <h3>Lobby Players</h3>
       <ul id="peerChainList"></ul>
-      <h3>Connections</h3>
+      <h3>Connection Info</h3>
       <ul>
-        <li><span class="info-label">Front Peer:</span> <span id="frontPeerId">-</span></li>
-        <li><span class="info-label">Back Peer:</span> <span id="backPeerId">-</span></li>
-        <li><span class="info-label">Front Conn:</span> <span id="frontConnStatus">-</span></li>
-        <li><span class="info-label">Back Conn:</span> <span id="backConnStatus">-</span></li>
+        <li><span class="info-label">Host:</span> <span id="frontPeerId">-</span></li>
+        <li><span class="info-label">Clients:</span> <span id="backPeerId">-</span></li>
+        <li><span class="info-label">Host Status:</span> <span id="frontConnStatus">-</span></li>
+        <li><span class="info-label">Lobby Status:</span> <span id="backConnStatus">-</span></li>
       </ul>
     </div>
   </div>

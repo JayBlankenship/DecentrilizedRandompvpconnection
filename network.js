@@ -4,7 +4,7 @@
 const Network = {
   // Configuration
   BASE_PEER_ID: 'ChainBootstrap-2025-001',
-  LOBBY_SIZE: 2, // Static for now, will be controlled by random later
+  LOBBY_SIZE: 3, // Hard coded to 3 - wait for 3 players before islanding
   
   // Private state
   myPeerId: null,
@@ -16,8 +16,15 @@ const Network = {
   isInitialized: false,
   basePeerConnections: {},
   baseConn: null,
+  basePeer: null, // Store reference to the BASE_PEER_ID peer instance
+  isDiscoveryBasePeer: false, // Track if basePeer is only for discovery
   lobbyPeers: [], // Array to store all peers in current lobby
   partnerConnections: {}, // Object to store connections to all lobby partners
+  lobbyConnectedPeers: [], // Track all connected peers including host
+  lobbyPeerConnections: {}, // Track all peer connections for lobby
+  lobbyFull: false, // Track if lobby is complete
+  retryCount: 0, // Track retry attempts
+  maxRetries: 5, // Maximum retry attempts before giving up
   
   // Callback functions for UI integration
   callbacks: {
@@ -55,7 +62,180 @@ const Network = {
     });
 
     this.peer.on('connection', (conn) => {
-      conn.on('data', (data) => this.handleData(conn, data));
+      // Handle different types of connections based on current state
+      if (this.isBase) {
+        // We are the host - handle direct client connections
+        conn.on('data', (data) => {
+          if (data.type === 'join_host') {
+            if (this.callbacks.logChainEvent) {
+              this.callbacks.logChainEvent(`[Host] Received join_host request from ${data.peerId}`);
+              this.callbacks.logChainEvent(`[Host] Current lobby state: ${this.lobbyConnectedPeers.length}/${this.LOBBY_SIZE} players, lobbyFull: ${this.lobbyFull}`);
+              this.callbacks.logChainEvent(`[Host] Current players: [${this.lobbyConnectedPeers.join(', ')}]`);
+              this.callbacks.logChainEvent(`[Host] Checking if ${data.peerId} is already in lobby: ${this.lobbyConnectedPeers.includes(data.peerId)}`);
+            }
+            
+            // Direct connection to host - double check lobby status
+            if (this.lobbyFull || this.lobbyConnectedPeers.length >= this.LOBBY_SIZE) {
+              if (this.callbacks.logChainEvent) {
+                this.callbacks.logChainEvent(`[Host] Lobby already complete (${this.lobbyConnectedPeers.length}/${this.LOBBY_SIZE}), rejecting ${data.peerId}`);
+              }
+              conn.send({
+                type: 'lobby_full',
+                message: 'Lobby is full, try starting your own lobby'
+              });
+              conn.close();
+              return;
+            }
+            
+            if (this.lobbyConnectedPeers.length < this.LOBBY_SIZE) {
+              // Check if this peer is already in the lobby to prevent duplicates
+              if (this.lobbyConnectedPeers.includes(data.peerId)) {
+                if (this.callbacks.logChainEvent) {
+                  this.callbacks.logChainEvent(`[Host] Player ${data.peerId} is already in lobby, ignoring duplicate join`);
+                }
+                // Still send waiting notification since they're already connected
+                conn.send({ 
+                  type: 'waiting', 
+                  current: this.lobbyConnectedPeers.length, 
+                  total: this.LOBBY_SIZE,
+                  message: `Already connected - waiting for ${this.LOBBY_SIZE - this.lobbyConnectedPeers.length} more player${this.LOBBY_SIZE - this.lobbyConnectedPeers.length !== 1 ? 's' : ''}`
+                });
+                return;
+              }
+              
+              this.lobbyConnectedPeers.push(data.peerId);
+              this.lobbyPeerConnections[data.peerId] = conn;
+              this.basePeerConnections[data.peerId] = conn;
+              
+              if (this.callbacks.logChainEvent) {
+                this.callbacks.logChainEvent(`[Host] Player ${this.lobbyConnectedPeers.length}/${this.LOBBY_SIZE} joined: ${data.peerId}`);
+                this.callbacks.logChainEvent(`[Host] Current players: ${this.lobbyConnectedPeers.join(', ')}`);
+              }
+              if (this.callbacks.updateConnectionStatus) {
+                this.callbacks.updateConnectionStatus(`Waiting for ${this.LOBBY_SIZE} players... (${this.lobbyConnectedPeers.length}/${this.LOBBY_SIZE})`);
+              }
+              
+              // Update UI to show current state
+              if (this.callbacks.updateUI) {
+                this.callbacks.updateUI();
+              }
+              
+              // Check if we have all 3 players (MUST be exactly 3)
+              if (this.lobbyConnectedPeers.length === this.LOBBY_SIZE) {
+                // Mark lobby as full to prevent more joins
+                this.lobbyFull = true;
+                
+                if (this.callbacks.logChainEvent) {
+                  this.callbacks.logChainEvent(`[Host] Lobby full! ${this.LOBBY_SIZE} players total: ${this.lobbyConnectedPeers.join(', ')}`);
+                  this.callbacks.logChainEvent(`[Host] This includes: 1 host + ${this.lobbyConnectedPeers.length - 1} clients`);
+                }
+                
+                // Base becomes the permanent host - store all client connections
+                this.lobbyPeers = this.lobbyConnectedPeers.slice(1); // All clients except host
+                this.partnerConnections = { ...this.lobbyPeerConnections }; // Store all client connections
+                this.paired = true;
+                
+                // Notify all clients that the lobby is ready and they're connected to host
+                for (let i = 1; i < this.lobbyConnectedPeers.length; i++) {
+                  const peerId = this.lobbyConnectedPeers[i];
+                  if (this.lobbyPeerConnections[peerId]) {
+                    this.lobbyPeerConnections[peerId].send({ 
+                      type: 'host_ready', 
+                      hostId: this.myPeerId,
+                      allPlayers: this.lobbyConnectedPeers 
+                    });
+                    if (this.callbacks.logChainEvent) {
+                      this.callbacks.logChainEvent(`[Host] Sent host_ready to client: ${peerId}`);
+                    }
+                  }
+                }
+                
+                if (this.callbacks.updateConnectionStatus) {
+                  this.callbacks.updateConnectionStatus(`Hosting ${this.LOBBY_SIZE}-player lobby! (1 host + ${this.lobbyConnectedPeers.length - 1} clients)`);
+                }
+                if (this.callbacks.logChainEvent) {
+                  this.callbacks.logChainEvent(`[Host] Now hosting ${this.LOBBY_SIZE} players as central host!`);
+                }
+                if (this.callbacks.updateUI) {
+                  this.callbacks.updateUI();
+                }
+                
+                // Now that lobby is full, release the BASE_PEER_ID so others can start new lobbies
+                if (this.callbacks.logChainEvent) {
+                  this.callbacks.logChainEvent(`[Host] Releasing BASE_PEER_ID to allow new lobbies to form`);
+                }
+                this.basePeer.destroy(); // Release the BASE_PEER_ID for others to use
+              } else {
+                // Not enough players yet, send waiting notification
+                conn.send({ 
+                  type: 'waiting', 
+                  current: this.lobbyConnectedPeers.length, 
+                  total: this.LOBBY_SIZE,
+                  message: `Waiting for ${this.LOBBY_SIZE - this.lobbyConnectedPeers.length} more player${this.LOBBY_SIZE - this.lobbyConnectedPeers.length !== 1 ? 's' : ''}`
+                });
+                
+                if (this.callbacks.logChainEvent) {
+                  this.callbacks.logChainEvent(`[Host] Still waiting for ${this.LOBBY_SIZE - this.lobbyConnectedPeers.length} more player${this.LOBBY_SIZE - this.lobbyConnectedPeers.length !== 1 ? 's' : ''}... Current: ${this.lobbyConnectedPeers.length}/${this.LOBBY_SIZE}`);
+                }
+              }
+            } else {
+              // Lobby is full, reject
+              if (this.callbacks.logChainEvent) {
+                this.callbacks.logChainEvent(`[Host] Lobby full (${this.LOBBY_SIZE}), rejecting ${data.peerId}`);
+              }
+              conn.close();
+            }
+          } else {
+            // Handle other data types
+            this.handleData(conn, data);
+          }
+        });
+
+        conn.on('close', () => {
+          // Remove from tracking when connection closes
+          let disconnectedPeerId = null;
+          for (const pid in this.basePeerConnections) {
+            if (this.basePeerConnections[pid] === conn) {
+              disconnectedPeerId = pid;
+              delete this.basePeerConnections[pid];
+              break;
+            }
+          }
+          
+          // Also remove from lobby tracking
+          if (disconnectedPeerId) {
+            const index = this.lobbyConnectedPeers.indexOf(disconnectedPeerId);
+            if (index > -1) {
+              this.lobbyConnectedPeers.splice(index, 1);
+              if (this.callbacks.logChainEvent) {
+                this.callbacks.logChainEvent(`[Host] Player ${disconnectedPeerId} disconnected, removed from lobby. Current players: ${this.lobbyConnectedPeers.length}/${this.LOBBY_SIZE}`);
+              }
+            }
+            delete this.lobbyPeerConnections[disconnectedPeerId];
+            delete this.partnerConnections[disconnectedPeerId];
+            
+            // If we lost players, mark lobby as no longer full
+            if (this.lobbyConnectedPeers.length < this.LOBBY_SIZE) {
+              this.lobbyFull = false;
+              if (this.callbacks.logChainEvent) {
+                this.callbacks.logChainEvent(`[Host] Lobby no longer full (${this.lobbyConnectedPeers.length}/${this.LOBBY_SIZE}), accepting new players`);
+              }
+              if (this.callbacks.updateConnectionStatus) {
+                this.callbacks.updateConnectionStatus(`Waiting for ${this.LOBBY_SIZE} players... (${this.lobbyConnectedPeers.length}/${this.LOBBY_SIZE})`);
+              }
+            }
+            
+            // Update UI to reflect current state
+            if (this.callbacks.updateUI) {
+              this.callbacks.updateUI();
+            }
+          }
+        });
+      } else {
+        // We are not the host - handle general data
+        conn.on('data', (data) => this.handleData(conn, data));
+      }
+      
       conn.on('open', () => {
         if (this.callbacks.logChainEvent) {
           this.callbacks.logChainEvent(`[Conn] Incoming connection from ${conn.peer}`);
@@ -84,70 +264,112 @@ const Network = {
   },
 
   tryBecomeBase() {
-    const basePeer = new Peer(this.BASE_PEER_ID, {
+    // Try to claim the BASE_PEER_ID directly
+    this.basePeer = new Peer(this.BASE_PEER_ID, {
       host: '0.peerjs.com', port: 443, path: '/', secure: true,
       config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
     });
+    this.isDiscoveryBasePeer = true;
 
-    basePeer.on('open', (id) => {
+    this.basePeer.on('open', (id) => {
+      // Successfully claimed the BASE_PEER_ID - we are the host
       this.isBase = true;
+      this.retryCount = 0; // Reset retry count on success
+      // Reset and initialize lobby tracking
+      this.lobbyConnectedPeers = [this.myPeerId]; // Track all peers including host
+      this.lobbyPeerConnections = {}; // Track all peer connections
+      this.lobbyFull = false; // Track if lobby is complete
+      this.isDiscoveryBasePeer = false; // Now this basePeer is the real host
+                // Only destroy the discovery basePeer, not the real host's peer instance
+                if (this.isDiscoveryBasePeer && this.basePeer) {
+                  this.basePeer.destroy();
+                  this.basePeer = null;
+                  if (this.callbacks.logChainEvent) {
+                    this.callbacks.logChainEvent(`[Host] Discovery basePeer destroyed.`);
+                  }
+                } else {
+                  if (this.callbacks.logChainEvent) {
+                    this.callbacks.logChainEvent(`[Host] Not destroying real host basePeer instance.`);
+                  }
+                }
+      
+      if (this.callbacks.logChainEvent) {
+        this.callbacks.logChainEvent(`[Base] Became base peer! Initialized lobby with host: ${this.myPeerId}`);
+        this.callbacks.logChainEvent(`[Base] Initial lobby state: [${this.lobbyConnectedPeers.join(', ')}] (${this.lobbyConnectedPeers.length}/${this.LOBBY_SIZE})`);
+      }
+      
       if (this.callbacks.updateConnectionStatus) {
-        this.callbacks.updateConnectionStatus('Waiting for a partner...');
+        this.callbacks.updateConnectionStatus(`Waiting for ${this.LOBBY_SIZE} players... (1/${this.LOBBY_SIZE})`);
       }
       if (this.callbacks.logChainEvent) {
-        this.callbacks.logChainEvent('[Base] Became base peer!');
+        this.callbacks.logChainEvent(`[Base] Waiting for ${this.LOBBY_SIZE} players total.`);
       }
       if (this.callbacks.updateUI) {
         this.callbacks.updateUI();
       }
-      
-      let firstPeer = this.myPeerId;
-      let secondPeer = null;
 
-      basePeer.on('connection', (conn) => {
+      this.basePeer.on('connection', (conn) => {
         conn.on('data', (data) => {
           if (data.type === 'join') {
-            if (!secondPeer) {
-              secondPeer = data.peerId;
+            // Check if lobby is already full BEFORE redirecting
+            if (this.lobbyFull || this.lobbyConnectedPeers.length >= this.LOBBY_SIZE) {
               if (this.callbacks.logChainEvent) {
-                this.callbacks.logChainEvent(`[Base] Second peer joined: ${secondPeer}, pairing with base: ${firstPeer}`);
+                this.callbacks.logChainEvent(`[Base] Lobby already complete (${this.lobbyConnectedPeers.length}/${this.LOBBY_SIZE}), rejecting ${data.peerId}`);
               }
-              // Pair both peers
-              this.basePeerConnections[firstPeer] = null; // base itself
-              this.basePeerConnections[secondPeer] = conn;
-              // Notify both peers
-              conn.send({ type: 'pair', partnerPeerId: firstPeer });
-              // Notify base peer itself
-              setTimeout(() => {
-                this.handleData(null, { type: 'pair', partnerPeerId: secondPeer });
-                // Remove base status
-                this.isBase = false;
-                if (this.callbacks.logChainEvent) {
-                  this.callbacks.logChainEvent('[Base] Pair formed, base status removed.');
-                }
-                basePeer.destroy();
-              }, 500);
+              conn.send({
+                type: 'lobby_full',
+                message: 'Lobby is full, try again later'
+              });
+              conn.close();
+              return;
             }
+            
+            // Double-check available space before redirecting
+            if (this.lobbyConnectedPeers.length < this.LOBBY_SIZE) {
+              // Instead of keeping the base connection, redirect to host's real peer ID
+              if (this.callbacks.logChainEvent) {
+                this.callbacks.logChainEvent(`[Base] Discovery request from ${data.peerId}, redirecting to host ${this.myPeerId} (${this.lobbyConnectedPeers.length}/${this.LOBBY_SIZE})`);
+              }
+              
+              conn.send({
+                type: 'redirect_to_host',
+                hostId: this.myPeerId,
+                currentPlayers: this.lobbyConnectedPeers.length,
+                totalPlayers: this.LOBBY_SIZE
+              });
+            } else {
+              // Lobby just filled up, reject
+              if (this.callbacks.logChainEvent) {
+                this.callbacks.logChainEvent(`[Base] Lobby just filled up, rejecting ${data.peerId}`);
+              }
+              conn.send({
+                type: 'lobby_full',
+                message: 'Lobby is full, try again later'
+              });
+            }
+            
+            // Close discovery connection immediately
+            conn.close();
           }
         });
 
         conn.on('close', () => {
-          for (const pid in this.basePeerConnections) {
-            if (this.basePeerConnections[pid] === conn) {
-              delete this.basePeerConnections[pid];
-              break;
-            }
+          // Discovery connections are temporary - no cleanup needed
+          if (this.callbacks.logChainEvent) {
+            this.callbacks.logChainEvent(`[Base] Discovery connection closed`);
           }
         });
       });
     });
 
-    basePeer.on('error', (err) => {
+    this.basePeer.on('error', (err) => {
+      // Failed to claim BASE_PEER_ID - someone else is already the host
       if (this.callbacks.logChainEvent) {
-        this.callbacks.logChainEvent(`[Base] Failed to become base peer: ${err.type}`, '#ffaa00');
+        this.callbacks.logChainEvent(`[Base] BASE_PEER_ID already taken (${err.type}), checking if lobby is available...`, '#ffaa00');
       }
       this.isBase = false;
-      // Give a small delay to ensure the base peer is ready
+      
+      // Try to join existing lobby first
       setTimeout(() => {
         this.joinChain();
       }, 1000);
@@ -156,120 +378,228 @@ const Network = {
 
   joinChain() {
     if (this.callbacks.updateConnectionStatus) {
-      this.callbacks.updateConnectionStatus('Joining pair...');
+      this.callbacks.updateConnectionStatus('Discovering lobby...');
     }
+    
+    // First, connect to BASE_PEER_ID for discovery
     this.baseConn = this.peer.connect(this.BASE_PEER_ID);
 
     this.baseConn.on('open', () => {
       this.baseConn.send({ type: 'join', peerId: this.myPeerId });
       if (this.callbacks.logChainEvent) {
-        this.callbacks.logChainEvent(`[Join] Sent join request to base`);
+        this.callbacks.logChainEvent(`[Discovery] Sent discovery request to base`);
       }
     });
 
     this.baseConn.on('data', (data) => {
-      if (data.type === 'pair') {
-        this.partnerPeerId = data.partnerPeerId;
-        this.paired = true;
+      console.log('Client received discovery data:', data);
+      
+      if (data.type === 'redirect_to_host') {
+        // Close discovery connection
+        this.baseConn.close();
+        
         if (this.callbacks.logChainEvent) {
-          this.callbacks.logChainEvent(`[Join] Paired with: ${this.partnerPeerId}`);
+          this.callbacks.logChainEvent(`[Discovery] Redirected to host: ${data.hostId}`);
         }
-        this.connectToPartner();
+        
+        // Connect directly to the host's real peer ID
+        this.connectToHost(data.hostId);
+        
+      } else if (data.type === 'lobby_full') {
+        if (this.callbacks.logChainEvent) {
+          this.callbacks.logChainEvent(`[Discovery] Lobby is full, attempting to start new lobby (attempt ${this.retryCount + 1}/${this.maxRetries})...`);
+        }
         if (this.callbacks.updateConnectionStatus) {
-          this.callbacks.updateConnectionStatus('Paired!');
+          this.callbacks.updateConnectionStatus('Lobby full, starting new lobby...');
         }
-        if (this.callbacks.updateUI) {
-          this.callbacks.updateUI();
+        
+        // Close connection
+        this.baseConn.close();
+        
+        // Increment retry count
+        this.retryCount++;
+        
+        if (this.retryCount < this.maxRetries) {
+          // Try to become base with increasing delay
+          const delay = 2000 + (this.retryCount * 3000); // 2s, 5s, 8s, 11s, 14s
+          setTimeout(() => {
+            this.tryBecomeBase();
+          }, delay);
+        } else {
+          // Too many retries, give up for now
+          if (this.callbacks.logChainEvent) {
+            this.callbacks.logChainEvent(`[Discovery] Too many retry attempts, waiting longer before trying again...`, '#ff4444');
+          }
+          if (this.callbacks.updateConnectionStatus) {
+            this.callbacks.updateConnectionStatus('All lobbies full, waiting...');
+          }
+          
+          // Reset retry count and wait much longer
+          this.retryCount = 0;
+          setTimeout(() => {
+            this.tryBecomeBase();
+          }, 30000); // Wait 30 seconds before trying again
         }
       }
     });
 
     this.baseConn.on('error', (err) => {
       if (this.callbacks.updateConnectionStatus) {
-        this.callbacks.updateConnectionStatus('Failed to join pair');
+        this.callbacks.updateConnectionStatus('Failed to discover lobby');
       }
       if (this.callbacks.logChainEvent) {
-        this.callbacks.logChainEvent(`[Join] Error: ${err.message}`, '#ff4444');
+        this.callbacks.logChainEvent(`[Discovery] Error: ${err.message}`, '#ff4444');
       }
     });
   },
-
-  connectToPartner() {
-    if (this.partnerConn) { 
-      this.partnerConn.close(); 
-      this.partnerConn = null; 
+  
+  connectToHost(hostId) {
+    if (this.callbacks.updateConnectionStatus) {
+      this.callbacks.updateConnectionStatus('Connecting to host...');
     }
+    
+    // Connect directly to the host's real peer ID
+    this.hostConn = this.peer.connect(hostId);
 
-    if (this.partnerPeerId) {
-      this.partnerConn = this.peer.connect(this.partnerPeerId);
+    this.hostConn.on('open', () => {
+      this.hostConn.send({ type: 'join_host', peerId: this.myPeerId });
+      if (this.callbacks.logChainEvent) {
+        this.callbacks.logChainEvent(`[Client] Connected to host: ${hostId}`);
+      }
+    });
 
-      this.partnerConn.on('open', () => {
+    this.hostConn.on('data', (data) => {
+      console.log('Client received host data:', data);
+      
+      if (data.type === 'host_ready') {
+        // Connected to host - lobby is ready
+        this.retryCount = 0; // Reset retry count on successful connection
+        this.partnerPeerId = data.hostId; // Host is our connection point
+        this.lobbyPeers = data.allPlayers.filter(peer => peer !== this.myPeerId); // All other players
+        this.paired = true;
+        this.baseConn = this.hostConn; // Use host connection as base connection for compatibility
+        
+        console.log('Client lobby ready - allPlayers:', data.allPlayers);
+        console.log('Client lobby - lobbyPeers (others):', this.lobbyPeers);
+        console.log('Client lobby - total players:', data.allPlayers.length);
+        
         if (this.callbacks.logChainEvent) {
-          this.callbacks.logChainEvent(`[Conn] Connected to partner: ${this.partnerPeerId}`);
-        }
-        if (this.baseConn) {
-          if (this.callbacks.logChainEvent) {
-            this.callbacks.logChainEvent('[Pair] Disconnecting from base peer (island formed)');
-          }
-          this.baseConn.close();
-          this.baseConn = null;
+          this.callbacks.logChainEvent(`[Client] Connected to host: ${data.hostId}, All players: ${data.allPlayers.join(', ')}`);
+          this.callbacks.logChainEvent(`[Client] Lobby has ${data.allPlayers.length} total players (including host)`);
+          this.callbacks.logChainEvent(`[Client] Other players: ${this.lobbyPeers.join(', ')}`);
         }
         if (this.callbacks.updateConnectionStatus) {
-          this.callbacks.updateConnectionStatus('Paired!');
+          this.callbacks.updateConnectionStatus(`Connected to host in ${data.allPlayers.length}-player lobby!`);
         }
         if (this.callbacks.updateUI) {
           this.callbacks.updateUI();
         }
-      });
-
-      this.partnerConn.on('data', (data) => this.handleData(this.partnerConn, data));
-
-      this.partnerConn.on('close', () => {
+      } else if (data.type === 'waiting') {
+        // Host is still waiting for more players
+        console.log('Client waiting for more players:', data);
+        
         if (this.callbacks.logChainEvent) {
-          this.callbacks.logChainEvent(`[Conn] Partner connection closed, looking for new partner...`, '#ff4444');
+          this.callbacks.logChainEvent(`[Client] Waiting for more players... (${data.current}/${data.total}) - ${data.message || 'Lobby not full yet'}`);
         }
-        // Reset pairing state and look for new partner
-        this.resetPairingAndRejoin();
-      });
-
-      this.partnerConn.on('error', (err) => {
+        if (this.callbacks.updateConnectionStatus) {
+          this.callbacks.updateConnectionStatus(`Waiting in queue... (${data.current}/${data.total})`);
+        }
+        // Update UI to show waiting state
+        if (this.callbacks.updateUI) {
+          this.callbacks.updateUI();
+        }
+      } else if (data.type === 'lobby_full') {
+        // Host rejected us - lobby is full
         if (this.callbacks.logChainEvent) {
-          this.callbacks.logChainEvent(`[Conn] Partner connection error: ${err.message}, looking for new partner...`, '#ff4444');
+          this.callbacks.logChainEvent(`[Client] Host lobby is full, becoming host of new lobby...`);
         }
-        // Reset pairing state and look for new partner
-        this.resetPairingAndRejoin();
-      });
-    }
+        if (this.callbacks.updateConnectionStatus) {
+          this.callbacks.updateConnectionStatus('Lobby full, starting new lobby...');
+        }
+        
+        // Close connection and try to become base
+        this.hostConn.close();
+        setTimeout(() => {
+          this.tryBecomeBase();
+        }, 1000);
+      } else {
+        // Handle all other message types (including 'message' type) through the general handler
+        this.handleData(this.hostConn, data);
+      }
+    });
+
+    this.hostConn.on('error', (err) => {
+      if (this.callbacks.updateConnectionStatus) {
+        this.callbacks.updateConnectionStatus('Failed to connect to host');
+      }
+      if (this.callbacks.logChainEvent) {
+        this.callbacks.logChainEvent(`[Client] Host connection error: ${err.message}`, '#ff4444');
+      }
+    });
   },
 
   handleData(conn, data) {
-    if (data.type === 'pair') {
-      this.partnerPeerId = data.partnerPeerId;
-      this.paired = true;
-      if (this.callbacks.logChainEvent) {
-        this.callbacks.logChainEvent(`[Pair] Received pairing notification with: ${this.partnerPeerId}`);
-      }
-      this.connectToPartner();
-      if (this.callbacks.updateConnectionStatus) {
-        this.callbacks.updateConnectionStatus('Paired!');
-      }
-      if (this.callbacks.updateUI) {
-        this.callbacks.updateUI();
-      }
-    } else if (data.type === 'message') {
+    if (this.callbacks.logChainEvent) {
+      this.callbacks.logChainEvent(`[HandleData] Received ${data.type} from ${conn.peer}, we are ${this.isBase ? 'HOST' : 'CLIENT'}`);
+    }
+    
+    if (data.type === 'message') {
+      // Display the message locally first
       if (this.callbacks.handleMessage) {
         this.callbacks.handleMessage(data);
       }
+      
+      // Only relay if message is not from us and we haven't already processed it
       if (data.from !== this.myPeerId) {
         this.relayMessage(data, conn ? conn.peer : null);
       }
     }
+    // Note: host_ready is handled in joinChain() baseConn.on('data') callback
+    // Don't duplicate that logic here to avoid conflicts
   },
 
   relayMessage(data, fromPeer) {
-    // Relay only to partner, except the one we got it from
-    if (this.partnerPeerId && this.partnerPeerId !== fromPeer && this.partnerConn && this.partnerConn.open) {
-      this.partnerConn.send(data);
+    if (this.callbacks.logChainEvent) {
+      this.callbacks.logChainEvent(`[Relay] Relaying message from ${data.from}, we are ${this.isBase ? 'HOST' : 'CLIENT'}, fromPeer: ${fromPeer}`);
+    }
+    
+    // If we're the host (center of star), relay to all clients except the sender
+    if (this.isBase && this.lobbyPeerConnections) {
+      let relayCount = 0;
+      for (const [peerId, conn] of Object.entries(this.lobbyPeerConnections)) {
+        // Don't send back to the sender, and only send to open connections
+        if (peerId !== fromPeer && conn && conn.open) {
+          try {
+            conn.send(data);
+            relayCount++;
+            if (this.callbacks.logChainEvent) {
+              this.callbacks.logChainEvent(`[Host-Relay] Forwarded message to client: ${peerId}`);
+            }
+          } catch (err) {
+            if (this.callbacks.logChainEvent) {
+              this.callbacks.logChainEvent(`[Host-Relay] Failed to send to ${peerId}: ${err.message}`, '#ff4444');
+            }
+          }
+        }
+      }
+      if (this.callbacks.logChainEvent) {
+        this.callbacks.logChainEvent(`[Host-Relay] Message relayed to ${relayCount} clients`);
+      }
+    } else if (!this.isBase) {
+      // If we're a client, only send to host (clients don't relay to other clients)
+      const hostConnection = this.hostConn || this.baseConn;
+      if (hostConnection && hostConnection.open && hostConnection.peer !== fromPeer) {
+        try {
+          hostConnection.send(data);
+          if (this.callbacks.logChainEvent) {
+            this.callbacks.logChainEvent(`[Client-Relay] Forwarded message to host: ${hostConnection.peer}`);
+          }
+        } catch (err) {
+          if (this.callbacks.logChainEvent) {
+            this.callbacks.logChainEvent(`[Client-Relay] Failed to send to host: ${err.message}`, '#ff4444');
+          }
+        }
+      }
     }
   },
 
@@ -301,90 +631,160 @@ const Network = {
       from: this.myPeerId
     };
 
-    // Send only to partner
-    if (this.partnerConn && this.partnerConn.open) {
-      this.partnerConn.send(payload);
+    let sentCount = 0;
+    let failedCount = 0;
+
+    // If we're the host (center of star), send to all clients
+    if (this.isBase && this.lobbyPeerConnections) {
+      for (const [peerId, conn] of Object.entries(this.lobbyPeerConnections)) {
+        if (conn && conn.open) {
+          try {
+            conn.send(payload);
+            sentCount++;
+            if (this.callbacks.logChainEvent) {
+              this.callbacks.logChainEvent(`[Host-Send] Message sent to client: ${peerId}`);
+            }
+          } catch (err) {
+            failedCount++;
+            if (this.callbacks.logChainEvent) {
+              this.callbacks.logChainEvent(`[Host-Send] Failed to send to ${peerId}: ${err.message}`, '#ff4444');
+            }
+          }
+        } else {
+          failedCount++;
+          if (this.callbacks.logChainEvent) {
+            this.callbacks.logChainEvent(`[Host-Send] Connection to ${peerId} is not open`, '#ff4444');
+          }
+        }
+      }
+      if (this.callbacks.logChainEvent) {
+        this.callbacks.logChainEvent(`[Host-Send] Message sent to ${sentCount} clients total (${failedCount} failed)`);
+      }
+    } else if (!this.isBase) {
+      // If we're a client, send only to host (host will relay to other clients)
+      const hostConnection = this.hostConn || this.baseConn;
+      if (hostConnection && hostConnection.open) {
+        try {
+          hostConnection.send(payload);
+          sentCount = 1;
+          if (this.callbacks.logChainEvent) {
+            this.callbacks.logChainEvent(`[Client-Send] Message sent to host: ${hostConnection.peer}`);
+          }
+        } catch (err) {
+          if (this.callbacks.logChainEvent) {
+            this.callbacks.logChainEvent(`[Client-Send] Failed to send to host: ${err.message}`, '#ff4444');
+          }
+        }
+      } else {
+        if (this.callbacks.logChainEvent) {
+          this.callbacks.logChainEvent(`[Client-Send] No open host connection available`, '#ff4444');
+        }
+      }
+    }
+
+    if (sentCount > 0) {
       if (this.callbacks.updateConnectionStatus) {
-        this.callbacks.updateConnectionStatus('Message sent to partner.');
+        this.callbacks.updateConnectionStatus(`Message sent to ${sentCount} peer(s).`);
       }
       return message;
     } else {
       if (this.callbacks.updateConnectionStatus) {
-        this.callbacks.updateConnectionStatus('Error: No connection to partner.');
+        this.callbacks.updateConnectionStatus('Error: No active connections.');
       }
       return null;
     }
   },
 
-  // Reset pairing state and rejoin matchmaking
+  // Reset lobby state and rejoin matchmaking
   resetPairingAndRejoin() {
-    // Reset pairing state
+    // Reset lobby state
     this.paired = false;
     this.partnerPeerId = null;
-    if (this.partnerConn) {
-      this.partnerConn.close();
-      this.partnerConn = null;
+    this.lobbyPeers = [];
+    this.lobbyConnectedPeers = [];
+    this.lobbyPeerConnections = {};
+    this.lobbyFull = false;
+    
+    // Clean up host connections if we were the host
+    if (this.isBase && this.partnerConnections) {
+      for (const [peerId, conn] of Object.entries(this.partnerConnections)) {
+        if (conn) {
+          conn.close();
+        }
+      }
+      this.partnerConnections = {};
     }
     
-    // Update UI to show we're looking for a new partner
+    // Clean up BASE_PEER_ID if we were the host
+    if (this.isBase && this.basePeer) {
+      if (this.callbacks.logChainEvent) {
+        this.callbacks.logChainEvent(`[Reset] Releasing BASE_PEER_ID during reset`);
+      }
+      this.basePeer.destroy();
+      this.basePeer = null;
+    }
+    
+    // Clean up client connections if we were a client
+    if (this.baseConn) {
+      this.baseConn.close();
+      this.baseConn = null;
+    }
+    if (this.hostConn) {
+      this.hostConn.close();
+      this.hostConn = null;
+    }
+    
+    // Reset host status
+    this.isBase = false;
+    
+    // Update UI to show we're looking for a new lobby
     if (this.callbacks.updateConnectionStatus) {
-      this.callbacks.updateConnectionStatus('Partner disconnected, looking for new partner...');
+      this.callbacks.updateConnectionStatus('Lobby disconnected, looking for new lobby...');
     }
     if (this.callbacks.updateUI) {
       this.callbacks.updateUI();
     }
     
-    // Start looking for a new partner
+    // Start looking for a new lobby
     if (this.callbacks.logChainEvent) {
-      this.callbacks.logChainEvent('[Rejoin] Starting search for new partner...', '#ffaa00');
+      this.callbacks.logChainEvent('[Rejoin] Starting search for new 3-player lobby...', '#ffaa00');
     }
     
-    // Try to become base first, if that fails, join existing base
+    // Try to become host first, if that fails, join existing host
     setTimeout(() => {
       this.tryBecomeBase();
     }, 1000);
   },
 
-  // Auto-reconnection - modified to handle rejoining when partner is lost
+  // Auto-reconnection - updated for host-based system
   startAutoReconnect() {
     setInterval(() => {
       if (!this.isInitialized) return;
       
-      // If we had a partner but lost connection and they're not reconnecting
-      if (this.partnerPeerId && (!this.partnerConn || this.partnerConn.open === false)) {
-        // Try to reconnect to existing partner first
+      // If we're a client and lost connection to host
+      if (!this.isBase && this.partnerPeerId && (!this.baseConn || this.baseConn.open === false)) {
         if (this.callbacks.logChainEvent) {
-          this.callbacks.logChainEvent(`[Auto] Attempting to reconnect to partner: ${this.partnerPeerId}`, '#00ccff');
+          this.callbacks.logChainEvent(`[Auto] Attempting to reconnect to host: ${this.partnerPeerId}`, '#00ccff');
         }
-        this.partnerConn = this.peer.connect(this.partnerPeerId);
-        
-        let reconnectTimeout = setTimeout(() => {
-          // If reconnection fails after 10 seconds, look for new partner
-          if (!this.partnerConn || this.partnerConn.open === false) {
-            if (this.callbacks.logChainEvent) {
-              this.callbacks.logChainEvent(`[Auto] Partner ${this.partnerPeerId} not responding, looking for new partner...`, '#ff8800');
-            }
-            this.resetPairingAndRejoin();
-          }
-        }, 10000);
-        
-        this.partnerConn.on('open', () => {
-          clearTimeout(reconnectTimeout);
-          if (this.callbacks.logChainEvent) {
-            this.callbacks.logChainEvent(`[Auto] Reconnected to partner: ${this.partnerPeerId}`);
-          }
-        });
-        this.partnerConn.on('data', (data) => this.handleData(this.partnerConn, data));
-        this.partnerConn.on('close', () => {
-          clearTimeout(reconnectTimeout);
-          this.resetPairingAndRejoin();
-        });
+        this.resetPairingAndRejoin();
       }
       
-      // If we're not paired at all, try to find a partner
+      // If we're a host and lost clients, they will try to reconnect to us
+      if (this.isBase && this.paired && this.partnerConnections) {
+        const activeConnections = Object.values(this.partnerConnections).filter(conn => conn && conn.open).length;
+        const totalConnections = Object.keys(this.partnerConnections).length;
+        
+        if (activeConnections < totalConnections) {
+          if (this.callbacks.logChainEvent) {
+            this.callbacks.logChainEvent(`[Auto] Host has ${activeConnections}/${totalConnections} active client connections`, '#ff8800');
+          }
+        }
+      }
+      
+      // If we're not in a lobby at all, try to find one
       if (!this.paired && !this.isBase) {
         if (this.callbacks.logChainEvent) {
-          this.callbacks.logChainEvent('[Auto] Not paired, attempting to find partner...', '#00ccff');
+          this.callbacks.logChainEvent('[Auto] Not in lobby, attempting to find 3-player lobby...', '#00ccff');
         }
         this.tryBecomeBase();
       }
