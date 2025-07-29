@@ -103,6 +103,45 @@ const PauseUI = {
       lobbyConnectedPeers: Network.lobbyConnectedPeers || [],
       lobbyFull: Network.lobbyFull || false
     };
+
+    // Update the dedicated 'Lobby Players' list (top right)
+    const lobbyPlayersDiv = document.getElementById('lobbyPlayers');
+    if (lobbyPlayersDiv) {
+      // Create a Set to ensure no duplicates
+      let uniquePeers = new Set();
+      
+      // Add all lobby peers
+      if (Array.isArray(networkState.lobbyPeers)) {
+        networkState.lobbyPeers.forEach(peer => {
+          if (peer) uniquePeers.add(peer);
+        });
+      }
+      
+      // Always ensure myPeerId is included
+      if (networkState.myPeerId) {
+        uniquePeers.add(networkState.myPeerId);
+      }
+      
+      // Add partnerPeerId if it exists
+      if (networkState.partnerPeerId) {
+        uniquePeers.add(networkState.partnerPeerId);
+      }
+      
+      // Convert Set to Array
+      let playerList = Array.from(uniquePeers);
+      
+      lobbyPlayersDiv.innerHTML = '<strong>Lobby Players</strong><br>' + playerList.map((peerId, idx) => {
+        if (networkState.isBase && peerId === networkState.myPeerId) {
+          return `#${idx + 1} (Host): ${peerId} (You)`;
+        } else if (!networkState.isBase && peerId === networkState.partnerPeerId) {
+          return `#${idx + 1} (Host): ${peerId}`;
+        } else if (peerId === networkState.myPeerId) {
+          return `#${idx + 1} (You): ${peerId}`;
+        } else {
+          return `#${idx + 1} (Client): ${peerId}`;
+        }
+      }).join('<br>');
+    }
     
     // Update peer ID display
     if (networkState.myPeerId && this.elements.peerInfoDiv) {
@@ -125,21 +164,19 @@ const PauseUI = {
       }
     }
 
-    // Update lobby size for 3-player lobby
+    // Update lobby size for dynamic lobby size
     if (this.elements.peerCount) {
+      const LOBBY_SIZE = Network.LOBBY_SIZE;
+      const currentCount = networkState.lobbyConnectedPeers.length || 1;
       if (networkState.isBase) {
-        // Host view - show actual count from lobbyConnectedPeers
-        const currentCount = networkState.lobbyConnectedPeers.length || 1;
-        if (networkState.lobbyFull && currentCount === 3) {
-          this.elements.peerCount.textContent = '3/3 Players (Full)';
+        if (networkState.lobbyFull && currentCount === LOBBY_SIZE) {
+          this.elements.peerCount.textContent = `${LOBBY_SIZE}/${LOBBY_SIZE} Player${LOBBY_SIZE !== 1 ? 's' : ''} (Full)`;
         } else {
-          this.elements.peerCount.textContent = `${currentCount}/3 Players`;
+          this.elements.peerCount.textContent = `${currentCount}/${LOBBY_SIZE} Player${LOBBY_SIZE !== 1 ? 's' : ''}`;
         }
       } else if (networkState.paired) {
-        // Client in full lobby
-        this.elements.peerCount.textContent = '3/3 Players (Full)';
+        this.elements.peerCount.textContent = `${LOBBY_SIZE}/${LOBBY_SIZE} Player${LOBBY_SIZE !== 1 ? 's' : ''} (Full)`;
       } else {
-        // Joining
         this.elements.peerCount.textContent = 'Connecting...';
       }
     }
@@ -156,7 +193,14 @@ const PauseUI = {
         }
       } else if (networkState.paired) {
         // Client view - show host and other clients
-        this.elements.nextPeerSpan.textContent = `Host + 1 other client`;
+        const totalClients = networkState.lobbyPeers.length - 1;
+        if (totalClients > 1) {
+          this.elements.nextPeerSpan.textContent = `Host + ${totalClients} other clients`;
+        } else if (totalClients === 1) {
+          this.elements.nextPeerSpan.textContent = `Host + 1 other client`;
+        } else {
+          this.elements.nextPeerSpan.textContent = `Host only`;
+        }
       } else {
         this.elements.nextPeerSpan.textContent = 'Searching...';
       }
@@ -195,107 +239,82 @@ const PauseUI = {
     }
 
     if (this.elements.backConnStatusSpan) {
+      const LOBBY_SIZE = Network.LOBBY_SIZE;
+      const currentCount = networkState.lobbyConnectedPeers.length || 1;
       if (networkState.isBase) {
-        // Host view
-        const currentCount = networkState.lobbyConnectedPeers.length || 1;
-        if (networkState.lobbyFull && currentCount === 3) {
-          this.elements.backConnStatusSpan.textContent = 'Active Lobby (3/3)';
+        if (networkState.lobbyFull && currentCount === LOBBY_SIZE) {
+          this.elements.backConnStatusSpan.textContent = `Active Lobby (${LOBBY_SIZE}/${LOBBY_SIZE})`;
         } else {
-          this.elements.backConnStatusSpan.textContent = `Waiting (${currentCount}/3)`;
+          this.elements.backConnStatusSpan.textContent = `Waiting (${currentCount}/${LOBBY_SIZE})`;
         }
       } else if (networkState.paired) {
-        this.elements.backConnStatusSpan.textContent = 'Active Lobby (3/3)';
+        this.elements.backConnStatusSpan.textContent = `Active Lobby (${LOBBY_SIZE}/${LOBBY_SIZE})`;
       } else {
         this.elements.backConnStatusSpan.textContent = 'Joining lobby...';
       }
     }
     
-    // Update peer chain list for 3-player lobby
+    // Update peer chain list for dynamic lobby size - DISABLED to prevent duplicates
+    // Now using lobbyPlayers div instead
+    /*
     if (this.elements.peerChainList) {
+      const LOBBY_SIZE = Network.LOBBY_SIZE;
       this.elements.peerChainList.innerHTML = '';
-      
-      if (networkState.isBase && networkState.lobbyFull) {
-        // Host view - show host + all clients (full lobby)
-        const li = document.createElement('li');
-        li.textContent = `#0 (Host): ${networkState.myPeerId}`;
-        li.style.color = '#00ff99';
-        this.elements.peerChainList.appendChild(li);
-        
-        Object.keys(networkState.partnerConnections).forEach((clientId, idx) => {
-          const li = document.createElement('li');
-          li.textContent = `#${idx + 1} (Client): ${clientId}`;
-          li.style.color = '#00ccff';
-          this.elements.peerChainList.appendChild(li);
-        });
-      } else if (networkState.isBase) {
-        // Host waiting for players
-        const currentCount = networkState.lobbyConnectedPeers.length || 1;
-        const li = document.createElement('li');
-        li.textContent = `#0 (Host): ${networkState.myPeerId} - Waiting for ${3 - currentCount} more player${3 - currentCount !== 1 ? 's' : ''}`;
-        li.style.color = '#ffaa00';
-        this.elements.peerChainList.appendChild(li);
-        
-        // Show any currently connected clients
-        for (let i = 1; i < currentCount; i++) {
-          const clientId = networkState.lobbyConnectedPeers[i];
-          const li = document.createElement('li');
-          li.textContent = `#${i} (Client): ${clientId}`;
-          li.style.color = '#00ccff';
-          this.elements.peerChainList.appendChild(li);
-        }
-      } else if (networkState.paired && !networkState.isBase) {
-        // Client view - show host + all lobby members
-        const li = document.createElement('li');
-        li.textContent = `#0 (Host): ${networkState.partnerPeerId}`;
-        li.style.color = '#ffaa00';
-        this.elements.peerChainList.appendChild(li);
-        
-        [networkState.myPeerId, ...networkState.lobbyPeers.filter(p => p !== networkState.partnerPeerId)].forEach((peerId, idx) => {
-          const li = document.createElement('li');
-          li.textContent = `#${idx + 1} (${peerId === networkState.myPeerId ? 'You' : 'Client'}): ${peerId}`;
-          li.style.color = peerId === networkState.myPeerId ? '#00ffcc' : '#00ccff';
-          this.elements.peerChainList.appendChild(li);
-        });
+      // Always show all lobby members for both host and clients
+      let peerList = [];
+      if (networkState.isBase) {
+        // Host: show self and all connected clients
+        peerList = [networkState.myPeerId, ...Object.keys(networkState.partnerConnections)];
+      } else if (networkState.paired) {
+        // Client: show host and all lobby peers
+        peerList = [networkState.partnerPeerId, ...networkState.lobbyPeers.filter(p => p !== networkState.partnerPeerId)];
       } else {
-        // Waiting state
-        const li = document.createElement('li');
-        li.textContent = `#0: ${networkState.myPeerId} (${networkState.isBase ? 'Waiting as Host' : 'Connecting...'})`;
-        li.style.color = '#00ffcc';
-        this.elements.peerChainList.appendChild(li);
+        // Not connected yet
+        peerList = [networkState.myPeerId];
       }
+      peerList.forEach((peerId, idx) => {
+        const li = document.createElement('li');
+        if (networkState.isBase && idx === 0) {
+          li.textContent = `#${idx} (Host): ${peerId}`;
+          li.style.color = '#00ff99';
+        } else if (!networkState.isBase && idx === 0) {
+          li.textContent = `#${idx} (Host): ${peerId}`;
+          li.style.color = '#ffaa00';
+        } else {
+          li.textContent = `#${idx} (${peerId === networkState.myPeerId ? 'You' : 'Client'}): ${peerId}`;
+          li.style.color = peerId === networkState.myPeerId ? '#00ffcc' : '#00ccff';
+        }
+        this.elements.peerChainList.appendChild(li);
+      });
     }
+    */
     
     // Update base peer indicator for host-based system
     if (this.elements.basePeerIndicator) {
-      console.log('Updating basePeerIndicator with state:', {
-        isBase: networkState.isBase,
-        paired: networkState.paired,
-        lobbyConnectedPeers: networkState.lobbyConnectedPeers.length,
-        lobbyFull: networkState.lobbyFull
-      });
-      
+      const LOBBY_SIZE = Network.LOBBY_SIZE;
+      const currentCount = networkState.lobbyConnectedPeers.length || 1;
       if (networkState.isBase) {
-        const currentCount = networkState.lobbyConnectedPeers.length || 1;
-        if (networkState.lobbyFull && currentCount === 3) {
-          this.elements.basePeerIndicator.textContent = 'You are the HOST of a full 3-player lobby';
+        if (networkState.lobbyFull && currentCount === LOBBY_SIZE) {
+          this.elements.basePeerIndicator.textContent = `You are the HOST of a full ${LOBBY_SIZE}-player lobby`;
           this.elements.basePeerIndicator.style.color = '#00ff99';
         } else {
-          this.elements.basePeerIndicator.textContent = `You are the HOST (${currentCount}/3 players)`;
+          this.elements.basePeerIndicator.textContent = `You are the HOST (${currentCount}/${LOBBY_SIZE} player${LOBBY_SIZE !== 1 ? 's' : ''})`;
           this.elements.basePeerIndicator.style.color = '#ffaa00';
         }
       } else if (networkState.paired) {
-        this.elements.basePeerIndicator.textContent = 'You are a CLIENT in a 3-player lobby';
+        this.elements.basePeerIndicator.textContent = `You are a CLIENT in a ${LOBBY_SIZE}-player lobby`;
         this.elements.basePeerIndicator.style.color = '#00ccff';
       } else {
-        this.elements.basePeerIndicator.textContent = 'Connecting to 3-player lobby...';
+        this.elements.basePeerIndicator.textContent = `Connecting to ${LOBBY_SIZE}-player lobby...`;
         this.elements.basePeerIndicator.style.color = '#ffaa00';
       }
     }
     
     // Update diagnostics for host-based system
     if (this.elements.diagnosticsStaticDiv) {
+      const LOBBY_SIZE = Network.LOBBY_SIZE;
       const roleText = networkState.isBase ? 
-        (networkState.lobbyFull ? 'HOST (Full Lobby)' : `HOST (${networkState.lobbyConnectedPeers.length || 1}/3)`) :
+        (networkState.lobbyFull ? `HOST (Full Lobby)` : `HOST (${networkState.lobbyConnectedPeers.length || 1}/${LOBBY_SIZE})`) :
         (networkState.paired ? 'CLIENT (Connected)' : 'CONNECTING');
       
       const connectionInfo = networkState.isBase ? 
@@ -303,8 +322,8 @@ const PauseUI = {
         (networkState.baseConn && networkState.baseConn.open ? 'Connected to Host' : 'Disconnected from Host');
       
       const lobbySize = networkState.isBase ?
-        `${networkState.lobbyConnectedPeers.length || 1}/3 players` :
-        (networkState.paired ? '3/3 players (full)' : 'Joining...');
+        `${networkState.lobbyConnectedPeers.length || 1}/${LOBBY_SIZE} player${LOBBY_SIZE !== 1 ? 's' : ''}` :
+        (networkState.paired ? `${LOBBY_SIZE}/${LOBBY_SIZE} player${LOBBY_SIZE !== 1 ? 's' : ''} (full)` : 'Joining...');
       
       this.elements.diagnosticsStaticDiv.innerHTML = `
         <div><strong>My Peer ID:</strong> ${networkState.myPeerId}</div>
@@ -312,7 +331,7 @@ const PauseUI = {
         <div><strong>Lobby Size:</strong> ${lobbySize}</div>
         <div><strong>Connection Info:</strong> ${connectionInfo}</div>
         <div><strong>Host ID:</strong> ${networkState.isBase ? networkState.myPeerId + ' (You)' : (networkState.partnerPeerId || 'Unknown')}</div>
-        <div><strong>Status:</strong> ${networkState.isBase ? (networkState.lobbyFull ? 'Full Lobby Ready' : 'Waiting for Players') : (networkState.paired ? 'In 3-Player Lobby' : 'Connecting...')}</div>
+        <div><strong>Status:</strong> ${networkState.isBase ? (networkState.lobbyFull ? 'Full Lobby Ready' : 'Waiting for Players') : (networkState.paired ? `In ${LOBBY_SIZE}-Player Lobby` : 'Connecting...')}</div>
       `;
     }
     

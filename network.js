@@ -4,7 +4,7 @@
 const Network = {
   // Configuration
   BASE_PEER_ID: 'ChainBootstrap-2025-001',
-  LOBBY_SIZE: 3, // Hard coded to 3 - wait for 3 players before islanding
+  LOBBY_SIZE: 2, // Change this value to set the number of players required before islanding
   
   // Private state
   myPeerId: null,
@@ -74,6 +74,9 @@ const Network = {
               this.callbacks.logChainEvent(`[Host] Checking if ${data.peerId} is already in lobby: ${this.lobbyConnectedPeers.includes(data.peerId)}`);
             }
             
+        if (this.callbacks.logChainEvent) {
+          this.callbacks.logChainEvent(`[Client] Lobby has ${this.LOBBY_SIZE} total players (including host)`);
+        }
             // Direct connection to host - double check lobby status
             if (this.lobbyFull || this.lobbyConnectedPeers.length >= this.LOBBY_SIZE) {
               if (this.callbacks.logChainEvent) {
@@ -87,6 +90,9 @@ const Network = {
               return;
             }
             
+        if (this.callbacks.updateConnectionStatus) {
+          this.callbacks.updateConnectionStatus(`Connected to host in ${this.LOBBY_SIZE}-player lobby!`);
+        }
             if (this.lobbyConnectedPeers.length < this.LOBBY_SIZE) {
               // Check if this peer is already in the lobby to prevent duplicates
               if (this.lobbyConnectedPeers.includes(data.peerId)) {
@@ -120,7 +126,7 @@ const Network = {
                 this.callbacks.updateUI();
               }
               
-              // Check if we have all 3 players (MUST be exactly 3)
+              // Check if we have all players (MUST be exactly LOBBY_SIZE)
               if (this.lobbyConnectedPeers.length === this.LOBBY_SIZE) {
                 // Mark lobby as full to prevent more joins
                 this.lobbyFull = true;
@@ -747,7 +753,7 @@ const Network = {
     
     // Start looking for a new lobby
     if (this.callbacks.logChainEvent) {
-      this.callbacks.logChainEvent('[Rejoin] Starting search for new 3-player lobby...', '#ffaa00');
+      this.callbacks.logChainEvent(`[Rejoin] Starting search for new ${this.LOBBY_SIZE}-player lobby...`, '#ffaa00');
     }
     
     // Try to become host first, if that fails, join existing host
@@ -784,7 +790,7 @@ const Network = {
       // If we're not in a lobby at all, try to find one
       if (!this.paired && !this.isBase) {
         if (this.callbacks.logChainEvent) {
-          this.callbacks.logChainEvent('[Auto] Not in lobby, attempting to find 3-player lobby...', '#00ccff');
+          this.callbacks.logChainEvent(`[Auto] Not in lobby, attempting to find ${this.LOBBY_SIZE}-player lobby...`, '#00ccff');
         }
         this.tryBecomeBase();
       }
