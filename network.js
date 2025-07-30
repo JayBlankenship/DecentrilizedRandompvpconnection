@@ -4,7 +4,7 @@
 const Network = {
   // Configuration
   BASE_PEER_ID: 'ChainBootstrap-2025-001',
-  LOBBY_SIZE: 3, // Change this value to set the number of players required before islanding
+  LOBBY_SIZE: 2, // Change this value to set the number of players required before islanding
   
   // Private state
   myPeerId: null,
